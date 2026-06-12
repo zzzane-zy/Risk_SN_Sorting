@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>风险 SN 分拣看板</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="title-block">
+          <h1>风险 SN 分拣看板</h1>
+          <div class="meta-row">
+            <span id="connectionBadge" class="badge neutral">连接中</span>
+            <span id="lastUpdated">等待数据</span>
+            <span id="dataFootprint"></span>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button id="refreshBtn" class="button primary" type="button">
+            <i data-lucide="refresh-cw"></i>
+            <span>刷新</span>
+          </button>
+          <button id="exportBtn" class="button" type="button">
+            <i data-lucide="download"></i>
+            <span>导出</span>
+          </button>
+          <button id="manualConfigBtn" class="button" type="button">
+            <i data-lucide="settings"></i>
+            <span>手动配置</span>
+          </button>
+          <button id="resetBtn" class="button" type="button">
+            <i data-lucide="rotate-ccw"></i>
+            <span>重置</span>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="kpi-grid" aria-label="关键指标">
+          <article class="kpi-card">
+            <span class="kpi-label">可扫码风险 SN</span>
+            <strong id="kpiRisk">0</strong>
+            <span id="kpiRiskNote" class="kpi-note">-</span>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">已分拣</span>
+            <strong id="kpiScanned">0</strong>
+            <span id="kpiProgress" class="kpi-note">0%</span>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">不良总数</span>
+            <strong id="kpiBad">0</strong>
+            <span id="kpiBadRate" class="kpi-note">0%</span>
+          </article>
+          <article class="kpi-card urgent">
+            <span class="kpi-label">遗漏未分拣</span>
+            <strong id="kpiMissing">0</strong>
+            <span id="kpiMissingRate" class="kpi-note">0%</span>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">空 SN 记录</span>
+            <strong id="kpiBlank">0</strong>
+            <span class="kpi-note">不可直接扫码匹配</span>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">未匹配扫码</span>
+            <strong id="kpiUnmatchedEvents">0</strong>
+            <span class="kpi-note">不计入进度</span>
+          </article>
+        </section>
+
+        <section class="filter-bar" aria-label="筛选">
+          <label>
+            <span>仓库</span>
+            <select id="warehouseFilter"></select>
+          </label>
+          <label>
+            <span>批次</span>
+            <select id="batchFilter"></select>
+          </label>
+          <label>
+            <span>入库单</span>
+            <input id="inboundFilter" type="search" list="inboundOptions" placeholder="输入入库单号" />
+            <datalist id="inboundOptions"></datalist>
+          </label>
+          <label>
+            <span>状态</span>
+            <select id="statusFilter">
+              <option value="">全部</option>
+              <option value="missing">未分拣</option>
+              <option value="scanned">已分拣</option>
+              <option value="bad">不良</option>
+              <option value="manual">手动配置</option>
+              <option value="duplicate">重复扫码</option>
+              <option value="blank">空 SN</option>
+              <option value="noConfig">未匹配调拨单</option>
+            </select>
+          </label>
+          <label class="search-field">
+            <span>搜索</span>
+            <input id="searchFilter" type="search" placeholder="SN / SKU / 批次 / 仓库" />
+          </label>
+        </section>
+
+        <section class="content-grid">
+          <section class="panel progress-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>批次 / 仓库进度</h2>
+                <p id="batchSummary">0 个组合</p>
+              </div>
+              <span id="activeFilterBadge" class="badge neutral">全部数据</span>
+            </div>
+            <div id="batchList" class="batch-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>仓库分布</h2>
+                <p id="warehouseSummary">0 个仓库</p>
+              </div>
+            </div>
+            <div id="warehouseChart" class="warehouse-chart"></div>
+          </section>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>风险 SN 匹配明细</h2>
+              <p id="tableSummary">0 条记录</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>风险 SN</th>
+                  <th>仓库</th>
+                  <th>批次</th>
+                  <th>入库单</th>
+                  <th>SKU</th>
+                  <th>扫码时间</th>
+                  <th>扫码仓</th>
+                  <th>次数</th>
+                </tr>
+              </thead>
+              <tbody id="riskTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel exception-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>数据异常</h2>
+              <p id="exceptionSummary">0 项</p>
+            </div>
+          </div>
+          <div id="exceptionList" class="exception-list"></div>
+        </section>
+      </main>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+
+    <div id="manualModal" class="modal-backdrop" aria-hidden="true">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="manualModalTitle">
+        <div class="modal-heading">
+          <div>
+            <h2 id="manualModalTitle">手动分拣配置</h2>
+            <p id="manualAuthState">未登录</p>
+          </div>
+          <button id="manualCloseBtn" class="icon-button" type="button" aria-label="关闭">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <form id="manualLoginForm" class="modal-section">
+          <label>
+            <span>配置密码</span>
+            <input id="manualPasswordInput" type="password" autocomplete="current-password" placeholder="输入密码" />
+          </label>
+          <button class="button primary" type="submit">
+            <i data-lucide="log-in"></i>
+            <span>登录</span>
+          </button>
+        </form>
+
+        <div id="manualConfigPanel" class="manual-panel" hidden>
+          <form id="manualOverrideForm" class="modal-section manual-form">
+            <label>
+              <span>仓库</span>
+              <select id="manualWarehouseInput"></select>
+            </label>
+            <label>
+              <span>批次</span>
+              <select id="manualBatchInput"></select>
+            </label>
+            <label>
+              <span>实际不良数量</span>
+              <input id="manualBadCountInput" type="number" min="0" step="1" placeholder="0" />
+            </label>
+            <label class="manual-note-field">
+              <span>备注</span>
+              <input id="manualNoteInput" type="text" maxlength="80" placeholder="可选" />
+            </label>
+            <div class="modal-actions">
+              <button class="button primary" type="submit">
+                <i data-lucide="save"></i>
+                <span>保存</span>
+              </button>
+              <button id="manualFormResetBtn" class="button" type="button">
+                <i data-lucide="eraser"></i>
+                <span>清空</span>
+              </button>
+            </div>
+          </form>
+
+          <div class="manual-tools">
+            <button id="manualExportBtn" class="button" type="button">
+              <i data-lucide="download"></i>
+              <span>导出配置</span>
+            </button>
+            <label class="button file-button">
+              <i data-lucide="upload"></i>
+              <span>导入配置</span>
+              <input id="manualImportFile" type="file" accept="application/json,.json" />
+            </label>
+            <button id="manualLogoutBtn" class="button" type="button">
+              <i data-lucide="log-out"></i>
+              <span>退出</span>
+            </button>
+          </div>
+
+          <div class="manual-list-wrap">
+            <div class="manual-list-heading">
+              <strong>当前配置</strong>
+              <span id="manualOverrideSummary">0 条</span>
+            </div>
+            <div id="manualOverrideList" class="manual-list"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>
