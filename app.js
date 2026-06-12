@@ -450,14 +450,52 @@ function applyStaticManualRules(rows) {
   const summary = {
     applied: 0,
     configured: state.staticManualRules.length,
+    skipped: 0,
+    scanEventPriorityBatches: 0,
     items: [],
   };
-
-  for (const rule of state.staticManualRules) {
+  const ruleMatches = state.staticManualRules.map((rule) => {
     const matchedRows = rows
       .filter((row) => row.hasSn && matchesStaticManualRule(row, rule))
       .sort((a, b) => (a.sn || "").localeCompare(b.sn || "", "zh-CN"));
+    const cloudOverlapCount = matchedRows.filter((row) => row.eventCount > 0).length;
+    return {
+      rule,
+      matchedRows,
+      cloudOverlapCount,
+      shipBatchKey: normalizeKey(rule.shipBatch),
+    };
+  });
+  const scanEventPriorityShipBatches = new Set(
+    ruleMatches
+      .filter((item) => item.shipBatchKey && item.cloudOverlapCount > 0)
+      .map((item) => item.shipBatchKey),
+  );
+  summary.scanEventPriorityBatches = scanEventPriorityShipBatches.size;
+
+  for (const item of ruleMatches) {
+    const { rule, matchedRows, cloudOverlapCount, shipBatchKey } = item;
+    const skippedByScanEvents = shipBatchKey
+      ? scanEventPriorityShipBatches.has(shipBatchKey)
+      : cloudOverlapCount > 0;
     let applied = 0;
+
+    if (skippedByScanEvents) {
+      summary.skipped += 1;
+      summary.items.push({
+        id: rule.id,
+        shipBatch: rule.shipBatch,
+        inbound: rule.inbound,
+        upstream: rule.upstream,
+        sku: rule.sku,
+        expectedRiskCount: rule.riskCount,
+        matched: matchedRows.length,
+        applied: 0,
+        cloudOverlapCount,
+        skippedByScanEvents: true,
+      });
+      continue;
+    }
 
     for (const row of matchedRows) {
       if (!row.manual || row.manualSource !== "file") applied += 1;
@@ -485,6 +523,8 @@ function applyStaticManualRules(rows) {
       expectedRiskCount: rule.riskCount,
       matched: matchedRows.length,
       applied,
+      cloudOverlapCount,
+      skippedByScanEvents: false,
     });
   }
 
@@ -975,21 +1015,25 @@ function renderExceptions(stats, model) {
   }
 
   if (model.staticManualSummary.configured > 0) {
-    const unmatchedRules = model.staticManualSummary.items.filter((item) => item.matched === 0).length;
+    const unmatchedRules = model.staticManualSummary.items.filter((item) => item.matched === 0 && !item.skippedByScanEvents).length;
+    const scanPriorityRules = model.staticManualSummary.items.filter((item) => item.skippedByScanEvents).length;
+    const scanPriorityDetail = scanPriorityRules
+      ? `，${nf.format(scanPriorityRules)} 条规则因 ${nf.format(model.staticManualSummary.scanEventPriorityBatches)} 个批次已命中 scan_events 而按云端优先`
+      : "";
     issues.push({
       level: unmatchedRules ? "warn" : "info",
       title: "文件手动标记已加载",
-      detail: `${nf.format(model.staticManualSummary.configured)} 条规则，匹配 ${nf.format(model.staticManualAppliedRows)} 个风险 SN${unmatchedRules ? `，${nf.format(unmatchedRules)} 条规则未匹配` : ""}。`,
+      detail: `${nf.format(model.staticManualSummary.configured)} 条规则，补标 ${nf.format(model.staticManualAppliedRows)} 个风险 SN${unmatchedRules ? `，${nf.format(unmatchedRules)} 条规则未匹配` : ""}${scanPriorityDetail}。`,
       count: model.staticManualAppliedRows,
     });
   }
 
-  if (model.manualAppliedRows > 0) {
+  if (model.localManualAppliedRows > 0) {
     issues.push({
       level: "info",
       title: "手动配置已计入进度",
-      detail: `本地补录 ${nf.format(model.manualSummary.configured)} 条配置，已补标 ${nf.format(model.manualAppliedRows)} 个 SN。`,
-      count: model.manualAppliedRows,
+      detail: `本地补录 ${nf.format(model.manualSummary.configured)} 条配置，已补标 ${nf.format(model.localManualAppliedRows)} 个 SN。`,
+      count: model.localManualAppliedRows,
     });
   }
 

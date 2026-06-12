@@ -34,6 +34,7 @@ Supabase URL 和 publishable key 已写在 `app.js` 顶部。publishable key 可
 
 - `manual-completed-batches.json` 是部署包内的静态手动标记数据源。页面每次刷新时会和 Supabase 数据一起读取它。
 - 静态手动标记按 `发货批次 + 入库单号 + 上游出库单号 + SKU` 匹配 `Risk_SN_list`，匹配到的风险 SN 会显示为 `手动标记`，并计入已分拣和不良数量。
+- 如果同一发货批次的静态手动标记 SN 已经出现在 `scan_events`，该发货批次会整批按云端扫码记录优先，不再用文件补标覆盖。
 - 静态手动标记不会写入 Supabase。要调整固定批次，直接修改 `manual-completed-batches.json` 后重新部署。
 - 页面右上角 `手动配置` 入口需要密码登录，默认密码是 `admin123`。
 - 密码配置在 `password-config.json`，当前使用 SHA-256 hex。要改密码，把新密码做 SHA-256 后替换 `passwordHash`。
