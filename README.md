@@ -17,6 +17,7 @@
 5. 已分拣和不良数量按唯一风险 SN 计数；重复扫码不会重复累加。
 6. 当前扫码表字段 `sn / result / warehouse_code / operator_name / scanned_at` 已适配；`result = risk` 会计入不良，`result = safe` 不计入不良。
 7. `scan_events` 里标识为测试的记录会被排除：`is_test = true`、`test_tag` 有值、或 `raw_payload.test_device = true` 均不计入进度。
+8. `扫码上报看板` 按 `scan_events` 原始记录统计扫描总数，支持按日/按小时查看每个上报仓的良品、不良品和涵盖批次。
 
 ## 部署
 

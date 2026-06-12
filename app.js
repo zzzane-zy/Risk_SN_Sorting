@@ -108,6 +108,7 @@ const state = {
     status: "",
     search: "",
   },
+  scanPeriodMode: "day",
   refreshTimer: null,
   toastTimer: null,
 };
@@ -156,6 +157,12 @@ function bindControls() {
   $("manualLogoutBtn").addEventListener("click", logoutManualConfig);
   $("manualWarehouseInput").addEventListener("change", updateManualBatchOptions);
   $("manualOverrideList").addEventListener("click", handleManualListClick);
+  document.querySelectorAll("[data-scan-period]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.scanPeriodMode = button.dataset.scanPeriod || "day";
+      renderFromModel();
+    });
+  });
 
   $("manualModal").addEventListener("click", (event) => {
     if (event.target === $("manualModal")) closeManualModal();
@@ -698,10 +705,12 @@ function renderFromModel() {
   const stats = computeStats(filteredRows, state.model);
   const groupStats = computeGroupStats(filteredRows);
   const warehouseStats = computeWarehouseStats(filteredRows);
+  const scanPeriodStats = computeScanPeriodStats(state.model, state.filters);
 
   renderKpis(stats);
   renderBatchList(groupStats);
   renderWarehouseChart(warehouseStats);
+  renderScanPeriodBoard(scanPeriodStats);
   renderRiskTable(filteredRows);
   renderExceptions(stats, state.model);
   renderHeader(stats);
@@ -839,6 +848,150 @@ function computeWarehouseStats(rows) {
     .sort((a, b) => b.scanable - a.scanable || a.warehouse.localeCompare(b.warehouse, "zh-CN"));
 }
 
+function computeScanPeriodStats(model, filters) {
+  const rowsBySn = new Map();
+  for (const row of model.rows) {
+    if (!row.snKey) continue;
+    if (!rowsBySn.has(row.snKey)) rowsBySn.set(row.snKey, []);
+    rowsBySn.get(row.snKey).push(row);
+  }
+
+  const groups = new Map();
+  const search = normalizeSearch(filters.search);
+  const inbound = normalizeSearch(filters.inbound);
+
+  for (const event of model.scanEvents) {
+    const matchedRows = event.snKey ? rowsBySn.get(event.snKey) || [] : [];
+    if (!scanEventMatchesFilters(event, matchedRows, filters, search, inbound)) continue;
+
+    const period = getScanPeriod(event.timestamp, state.scanPeriodMode);
+    const warehouse = displayScanWarehouse(event, matchedRows);
+    const key = `${period.key}|||${warehouse}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        periodKey: period.key,
+        periodLabel: period.label,
+        periodStart: period.start,
+        warehouse,
+        total: 0,
+        good: 0,
+        bad: 0,
+        batches: new Set(),
+      });
+    }
+
+    const group = groups.get(key);
+    group.total += 1;
+    if (event.bad) group.bad += 1;
+    else group.good += 1;
+
+    const batchLabels = getEventBatchLabels(matchedRows);
+    batchLabels.forEach((batch) => group.batches.add(batch));
+  }
+
+  return [...groups.values()]
+    .map((group) => {
+      const batches = [...group.batches].sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+      return {
+        ...group,
+        batches,
+        batchLabel: formatBatchList(batches),
+        badRate: ratio(group.bad, group.total),
+      };
+    })
+    .sort((a, b) => {
+      if (a.periodStart || b.periodStart) {
+        if (!a.periodStart) return 1;
+        if (!b.periodStart) return -1;
+        if (a.periodStart !== b.periodStart) return b.periodStart - a.periodStart;
+      }
+      return a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true });
+    });
+}
+
+function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
+  if (filters.warehouse) {
+    const eventWarehouse = normalizeKey(event.warehouse);
+    const selectedWarehouse = normalizeKey(filters.warehouse);
+    const riskWarehouseMatched = matchedRows.some((row) => normalizeKey(row.warehouse) === selectedWarehouse);
+    if (eventWarehouse !== selectedWarehouse && !riskWarehouseMatched) return false;
+  }
+
+  if (filters.batch && !matchedRows.some((row) => row.batch === filters.batch || row.shipBatch === filters.batch)) return false;
+  if (inbound && !matchedRows.some((row) => normalizeSearch(row.inbound).includes(inbound))) return false;
+
+  if (filters.status === "bad" && !event.bad) return false;
+  if (filters.status === "duplicate" && matchedRows.every((row) => row.eventCount < 2)) return false;
+  if (filters.status === "blank" && event.snKey) return false;
+  if (filters.status === "noConfig" && matchedRows.some((row) => row.configMatched)) return false;
+  if (filters.status === "manual") return false;
+  if (filters.status === "missing") return false;
+
+  if (search) {
+    const haystack = normalizeSearch(
+      [
+        event.rawSn,
+        event.warehouse,
+        event.operator,
+        event.time,
+        ...matchedRows.flatMap((row) => [
+          row.sn,
+          row.machine,
+          row.inbound,
+          row.upstream,
+          row.sku,
+          row.itemName,
+          row.batch,
+          row.shipBatch,
+          row.warehouse,
+          row.destination,
+        ]),
+      ].join(" "),
+    );
+    if (!haystack.includes(search)) return false;
+  }
+
+  return true;
+}
+
+function displayScanWarehouse(event, matchedRows) {
+  return clean(event.warehouse) || clean(matchedRows[0]?.warehouse) || "未上报仓库";
+}
+
+function getEventBatchLabels(matchedRows) {
+  const labels = matchedRows.map((row) => clean(row.shipBatch || row.batch)).filter(Boolean);
+  return labels.length ? labels : ["未匹配风险清单"];
+}
+
+function formatBatchList(batches) {
+  if (!batches.length) return "-";
+  const visible = batches.slice(0, 5).join(" / ");
+  return batches.length > 5 ? `${visible} 等 ${nf.format(batches.length)} 个` : visible;
+}
+
+function getScanPeriod(timestamp, mode) {
+  if (!timestamp) return { key: "unknown", label: "无时间", start: 0 };
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = pad2(date.getMonth() + 1);
+  const day = pad2(date.getDate());
+  const hour = pad2(date.getHours());
+  if (mode === "hour") {
+    return {
+      key: `${year}-${month}-${day} ${hour}`,
+      label: `${year}-${month}-${day} ${hour}:00`,
+      start: new Date(year, date.getMonth(), date.getDate(), date.getHours()).getTime(),
+    };
+  }
+  return {
+    key: `${year}-${month}-${day}`,
+    label: `${year}-${month}-${day}`,
+    start: new Date(year, date.getMonth(), date.getDate()).getTime(),
+  };
+}
+
 function renderKpis(stats) {
   setText("kpiRisk", nf.format(stats.scanable));
   setText("kpiRiskNote", `剔除空 SN · 共 ${nf.format(stats.rowsTotal)} 条风险记录`);
@@ -941,6 +1094,40 @@ function renderWarehouseChart(groups) {
       renderFromModel();
     });
   });
+}
+
+function renderScanPeriodBoard(groups) {
+  document.querySelectorAll("[data-scan-period]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.scanPeriod === state.scanPeriodMode);
+  });
+
+  const visibleRows = groups.slice(0, 240);
+  const totalEvents = groups.reduce((sum, group) => sum + group.total, 0);
+  const warehouses = new Set(groups.map((group) => group.warehouse)).size;
+  $("scanPeriodSummary").textContent =
+    `${state.scanPeriodMode === "hour" ? "按小时" : "按日"} · ${nf.format(groups.length)} 个时间/仓组合 · ${nf.format(warehouses)} 个仓 · ${nf.format(totalEvents)} 条扫码`;
+
+  const tbody = $("scanPeriodTableBody");
+  if (!visibleRows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">暂无扫码上报数据</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = visibleRows
+    .map(
+      (group) => `
+        <tr>
+          <td class="mono">${escapeHtml(group.periodLabel)}</td>
+          <td><span class="truncate" title="${escapeAttr(group.warehouse)}">${escapeHtml(group.warehouse)}</span></td>
+          <td><strong>${nf.format(group.total)}</strong></td>
+          <td>${nf.format(group.good)}</td>
+          <td>${nf.format(group.bad)}</td>
+          <td>${formatPct(group.badRate)}</td>
+          <td><span class="truncate" title="${escapeAttr(group.batches.join(" / "))}">${escapeHtml(group.batchLabel)}</span></td>
+        </tr>
+      `,
+    )
+    .join("");
 }
 
 function renderRiskTable(rows) {
@@ -1662,6 +1849,10 @@ function formatPct(value) {
   return `${pctf.format(value * 100)}%`;
 }
 
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
 function uniqueSorted(values) {
   return [...new Set(values.map(clean).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
@@ -1684,6 +1875,7 @@ function setLoading(loading) {
 function showFatal(message) {
   setConnection("初始化失败", "bad");
   $("batchList").innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="7" class="empty-state">${escapeHtml(message)}</td></tr>`;
   showToast(message);
 }
 
@@ -1691,6 +1883,7 @@ function renderErrors(error) {
   const message = escapeHtml(error?.message || "数据读取失败");
   $("batchList").innerHTML = `<div class="empty-state">${message}</div>`;
   $("warehouseChart").innerHTML = `<div class="empty-state">${message}</div>`;
+  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="7" class="empty-state">${message}</td></tr>`;
   $("riskTableBody").innerHTML = `<tr><td colspan="9" class="empty-state">${message}</td></tr>`;
   $("exceptionList").innerHTML = `<div class="empty-state">${message}</div>`;
 }

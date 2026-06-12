@@ -483,6 +483,66 @@ button {
   background: var(--red);
 }
 
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #eef2f7;
+  flex: 0 0 auto;
+}
+
+.segmented button {
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.segmented button:hover {
+  color: var(--text);
+  background: #ffffff;
+}
+
+.segmented button.active {
+  color: var(--blue);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.08);
+}
+
+.scan-period-panel {
+  margin-bottom: 12px;
+}
+
+.scan-period-panel .panel-heading {
+  flex-wrap: wrap;
+}
+
+.scan-period-wrap {
+  max-height: 420px;
+}
+
+.scan-period-table {
+  min-width: 940px;
+}
+
+.scan-period-table th:nth-child(3),
+.scan-period-table th:nth-child(4),
+.scan-period-table th:nth-child(5),
+.scan-period-table th:nth-child(6),
+.scan-period-table td:nth-child(3),
+.scan-period-table td:nth-child(4),
+.scan-period-table td:nth-child(5),
+.scan-period-table td:nth-child(6) {
+  text-align: right;
+}
+
 .table-panel {
   margin-bottom: 12px;
 }

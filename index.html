@@ -120,6 +120,35 @@
           </section>
         </section>
 
+        <section class="panel scan-period-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>扫码上报看板</h2>
+              <p id="scanPeriodSummary">0 个时间段</p>
+            </div>
+            <div class="segmented" role="group" aria-label="扫码时间粒度">
+              <button class="active" type="button" data-scan-period="day">按日</button>
+              <button type="button" data-scan-period="hour">按小时</button>
+            </div>
+          </div>
+          <div class="table-wrap scan-period-wrap">
+            <table class="scan-period-table">
+              <thead>
+                <tr>
+                  <th>扫描时间</th>
+                  <th>仓</th>
+                  <th>总数</th>
+                  <th>良品</th>
+                  <th>不良品</th>
+                  <th>不良率</th>
+                  <th>涵盖批次</th>
+                </tr>
+              </thead>
+              <tbody id="scanPeriodTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="panel table-panel">
           <div class="panel-heading">
             <div>
