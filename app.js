@@ -166,6 +166,7 @@ const state = {
     search: "",
   },
   scanPeriodMode: "day",
+  scanGroupMode: "sku",
   refreshTimer: null,
   toastTimer: null,
 };
@@ -182,6 +183,7 @@ window.addEventListener("DOMContentLoaded", init);
 async function init() {
   state.manualOverrides = loadManualOverrides();
   state.manualAuthenticated = window.sessionStorage.getItem(SESSION_STORAGE_KEY) === "authenticated";
+  applyUrlDefaults();
   bindControls();
   renderManualAuthState();
   renderIcons();
@@ -198,6 +200,14 @@ async function init() {
   await loadAllData();
   subscribeToRealtime();
   window.setInterval(refreshScanEvents, 60000);
+}
+
+function applyUrlDefaults() {
+  const params = new URLSearchParams(window.location.search);
+  const scanGroup = params.get("scanGroup");
+  const scanPeriod = params.get("scanPeriod");
+  if (scanGroup === "batch" || scanGroup === "sku") state.scanGroupMode = scanGroup;
+  if (scanPeriod === "hour" || scanPeriod === "day") state.scanPeriodMode = scanPeriod;
 }
 
 function bindControls() {
@@ -217,6 +227,12 @@ function bindControls() {
   document.querySelectorAll("[data-scan-period]").forEach((button) => {
     button.addEventListener("click", () => {
       state.scanPeriodMode = button.dataset.scanPeriod || "day";
+      renderFromModel();
+    });
+  });
+  document.querySelectorAll("[data-scan-group]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.scanGroupMode = button.dataset.scanGroup || "sku";
       renderFromModel();
     });
   });
@@ -935,6 +951,8 @@ function computeScanPeriodStats(model, filters) {
   const groups = new Map();
   const search = normalizeSearch(filters.search);
   const inbound = normalizeSearch(filters.inbound);
+  const preparedEvents = [];
+  const baseBatchIndex = new Map();
 
   for (const event of model.scanEvents) {
     const matchedRows = event.snKey ? rowsBySn.get(event.snKey) || [] : [];
@@ -945,17 +963,31 @@ function computeScanPeriodStats(model, filters) {
     if (!scanEventMatchesFilters(event, matchedRows, filters, search, inbound, warehouse, skuInfo)) continue;
 
     const sku = skuInfo.sku;
-    const key = `${period.key}|||${warehouse}|||${sku}`;
+    const baseKey = `${period.key}|||${warehouse}|||${sku}`;
+    const validBatches = getEventBatchLabels(matchedRows);
+    preparedEvents.push({ event, period, warehouse, skuInfo, sku, baseKey, validBatches });
+
+    if (!baseBatchIndex.has(baseKey)) baseBatchIndex.set(baseKey, new Set());
+    validBatches.forEach((batch) => baseBatchIndex.get(baseKey).add(batch));
+  }
+
+  for (const item of preparedEvents) {
+    const assignedBatch = resolveScanGroupBatch(item, baseBatchIndex);
+    const key =
+      state.scanGroupMode === "batch"
+        ? `${item.baseKey}|||${assignedBatch || "__SKU_SUMMARY__"}`
+        : item.baseKey;
 
     if (!groups.has(key)) {
       groups.set(key, {
         key,
-        periodKey: period.key,
-        periodLabel: period.label,
-        periodStart: period.start,
-        warehouse,
-        sku,
-        itemName: skuInfo.itemName,
+        periodKey: item.period.key,
+        periodLabel: item.period.label,
+        periodStart: item.period.start,
+        warehouse: item.warehouse,
+        sku: item.sku,
+        itemName: item.skuInfo.itemName,
+        groupBatch: state.scanGroupMode === "batch" ? assignedBatch : "",
         total: 0,
         good: 0,
         bad: 0,
@@ -965,11 +997,15 @@ function computeScanPeriodStats(model, filters) {
 
     const group = groups.get(key);
     group.total += 1;
-    if (event.bad) group.bad += 1;
+    if (item.event.bad) group.bad += 1;
     else group.good += 1;
-
-    const batchLabels = getEventBatchLabels(matchedRows);
-    batchLabels.forEach((batch) => group.batches.add(batch));
+    const batchesToAdd =
+      state.scanGroupMode === "batch"
+        ? assignedBatch
+          ? [assignedBatch]
+          : []
+        : item.validBatches;
+    batchesToAdd.forEach((batch) => group.batches.add(batch));
   }
 
   return [...groups.values()]
@@ -978,7 +1014,7 @@ function computeScanPeriodStats(model, filters) {
       return {
         ...group,
         batches,
-        batchLabel: formatBatchList(batches),
+        batchLabel: state.scanGroupMode === "batch" ? group.groupBatch || "按SKU汇总" : formatBatchList(batches),
         badRate: ratio(group.bad, group.total),
       };
     })
@@ -990,9 +1026,19 @@ function computeScanPeriodStats(model, filters) {
       }
       return (
         a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true }) ||
-        a.sku.localeCompare(b.sku, "zh-CN", { numeric: true })
+        a.sku.localeCompare(b.sku, "zh-CN", { numeric: true }) ||
+        (a.groupBatch || "").localeCompare(b.groupBatch || "", "zh-CN", { numeric: true })
       );
     });
+}
+
+function resolveScanGroupBatch(item, baseBatchIndex) {
+  if (state.scanGroupMode !== "batch") return "";
+  if (item.validBatches.length === 1) return item.validBatches[0];
+  if (item.validBatches.length > 1) return item.validBatches.join(" / ");
+
+  const relatedBatches = [...(baseBatchIndex.get(item.baseKey) || [])];
+  return relatedBatches.length === 1 ? relatedBatches[0] : "";
 }
 
 function scanEventMatchesFilters(event, matchedRows, filters, search, inbound, warehouse, skuInfo) {
@@ -1146,8 +1192,14 @@ function inferSkuFromSn(value) {
 }
 
 function getEventBatchLabels(matchedRows) {
-  const labels = matchedRows.map((row) => clean(row.shipBatch || row.batch)).filter(Boolean);
-  return labels;
+  return uniqueSorted(matchedRows.map((row) => clean(row.shipBatch || row.batch)).filter(isConfiguredScanBatch));
+}
+
+function isConfiguredScanBatch(value) {
+  const text = clean(value);
+  if (!text) return false;
+  const normalized = normalizeKey(text);
+  return normalized && normalized !== "未配置批次" && normalized !== "未匹配风险清单" && normalized !== "按SKU汇总";
 }
 
 function formatBatchList(batches) {
@@ -1282,6 +1334,9 @@ function renderWarehouseChart(groups) {
 }
 
 function renderScanPeriodBoard(groups) {
+  document.querySelectorAll("[data-scan-group]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.scanGroup === state.scanGroupMode);
+  });
   document.querySelectorAll("[data-scan-period]").forEach((button) => {
     button.classList.toggle("active", button.dataset.scanPeriod === state.scanPeriodMode);
   });
@@ -1290,8 +1345,9 @@ function renderScanPeriodBoard(groups) {
   const totalEvents = groups.reduce((sum, group) => sum + group.total, 0);
   const warehouses = new Set(groups.map((group) => group.warehouse)).size;
   const skus = new Set(groups.map((group) => group.sku)).size;
+  const dimension = state.scanGroupMode === "batch" ? "时间/仓/SKU/批次组合" : "时间/仓/SKU组合";
   $("scanPeriodSummary").textContent =
-    `${state.scanPeriodMode === "hour" ? "按小时" : "按日"} · ${nf.format(groups.length)} 个时间/仓/SKU组合 · ${nf.format(warehouses)} 个仓 · ${nf.format(skus)} 个SKU · ${nf.format(totalEvents)} 条扫码`;
+    `${state.scanPeriodMode === "hour" ? "按小时" : "按日"} · ${state.scanGroupMode === "batch" ? "按批次" : "按SKU"} · ${nf.format(groups.length)} 个${dimension} · ${nf.format(warehouses)} 个仓 · ${nf.format(skus)} 个SKU · ${nf.format(totalEvents)} 条扫码`;
 
   const tbody = $("scanPeriodTableBody");
   if (!visibleRows.length) {
@@ -1313,7 +1369,7 @@ function renderScanPeriodBoard(groups) {
           <td>${nf.format(group.good)}</td>
           <td>${nf.format(group.bad)}</td>
           <td>${formatPct(group.badRate)}</td>
-          <td><span class="truncate" title="${escapeAttr(group.batches.join(" / "))}">${escapeHtml(group.batchLabel)}</span></td>
+          <td><span class="truncate" title="${escapeAttr(group.batches.length ? group.batches.join(" / ") : group.batchLabel)}">${escapeHtml(group.batchLabel)}</span></td>
         </tr>
       `,
     )

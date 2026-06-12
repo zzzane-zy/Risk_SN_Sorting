@@ -18,6 +18,7 @@
 6. 当前扫码表字段 `sn / result / warehouse_code / operator_name / scanned_at` 已适配；`result = risk` 会计入不良，`result = safe` 不计入不良。
 7. `scan_events` 里标识为测试的记录会被排除：`is_test = true`、`test_tag` 有值、或 `raw_payload.test_device = true` 均不计入进度。
 8. `扫码上报看板` 按 `scan_events` 原始记录统计扫描总数；仓库和 SKU 口径优先通过扫码 SN 反查 `Risk_SN_list`，再匹配调拨配置得到入库仓。未命中风险清单但可识别的扫码，会优先用当前时间段的 `device_id` 反推入库仓、用 SN 前缀识别 SKU，并按 SKU 关联品名。
+9. `扫码上报看板` 支持 `按SKU` / `按批次` 切换。按批次时会细化到 `时间段 + 入库仓 + SKU + 批次`；safe 或未配置批次的记录会优先合并到同时间段、同仓、同 SKU 的唯一明确批次，无法唯一判断时显示为 `按SKU汇总`。
 
 ## 部署
 
