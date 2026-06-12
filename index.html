@@ -43,34 +43,24 @@
       <main>
         <section class="kpi-grid" aria-label="关键指标">
           <article class="kpi-card">
-            <span class="kpi-label">可扫码风险 SN</span>
+            <span class="kpi-label">有效风险SN总数</span>
             <strong id="kpiRisk">0</strong>
             <span id="kpiRiskNote" class="kpi-note">-</span>
           </article>
           <article class="kpi-card">
-            <span class="kpi-label">已分拣</span>
+            <span class="kpi-label">已扫码总数</span>
+            <strong id="kpiScanEvents">0</strong>
+            <span id="kpiScanEventsNote" class="kpi-note">排除测试后</span>
+          </article>
+          <article class="kpi-card">
+            <span class="kpi-label">已分拣风险SN总数</span>
             <strong id="kpiScanned">0</strong>
             <span id="kpiProgress" class="kpi-note">0%</span>
           </article>
-          <article class="kpi-card">
-            <span class="kpi-label">不良总数</span>
-            <strong id="kpiBad">0</strong>
-            <span id="kpiBadRate" class="kpi-note">0%</span>
-          </article>
           <article class="kpi-card urgent">
-            <span class="kpi-label">遗漏未分拣</span>
+            <span class="kpi-label">剩余风险SN总数</span>
             <strong id="kpiMissing">0</strong>
             <span id="kpiMissingRate" class="kpi-note">0%</span>
-          </article>
-          <article class="kpi-card">
-            <span class="kpi-label">空 SN 记录</span>
-            <strong id="kpiBlank">0</strong>
-            <span class="kpi-note">不可直接扫码匹配</span>
-          </article>
-          <article class="kpi-card">
-            <span class="kpi-label">未匹配扫码</span>
-            <strong id="kpiUnmatchedEvents">0</strong>
-            <span class="kpi-note">不计入进度</span>
           </article>
         </section>
 

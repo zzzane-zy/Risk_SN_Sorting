@@ -8,6 +8,7 @@ const TABLES = {
 };
 
 const PASSWORD_CONFIG_URL = "./password-config.json";
+const STATIC_MANUAL_CONFIG_URL = "./manual-completed-batches.json";
 const DEFAULT_PASSWORD_HASH = "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9";
 const MANUAL_STORAGE_KEY = "warehouse-progress-dashboard.manual-overrides.v1";
 const SESSION_STORAGE_KEY = "warehouse-progress-dashboard.manual-session.v1";
@@ -86,12 +87,14 @@ const FIELDS = {
 const PAGE_SIZE = 1000;
 const INVALID_KEYS = new Set(["", "#N/A", "N/A", "NA", "NULL", "UNDEFINED", "-", "0", "亚马逊"]);
 const MAX_TABLE_ROWS = 600;
+const RECENT_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 const state = {
   client: null,
   warehouseRows: [],
   riskRows: [],
   scanRows: [],
+  staticManualRules: [],
   manualOverrides: [],
   manualAuthenticated: false,
   editingManualId: "",
@@ -181,15 +184,17 @@ async function loadAllData() {
   setLoading(true);
   setConnection("同步中", "info");
   try {
-    const [warehouseRows, riskRows, scanRows] = await Promise.all([
+    const [warehouseRows, riskRows, scanRows, staticManualRules] = await Promise.all([
       fetchAllRows(TABLES.warehouse),
       fetchAllRows(TABLES.risk),
       fetchAllRows(TABLES.scans),
+      fetchStaticManualRules(),
     ]);
 
     state.warehouseRows = warehouseRows;
     state.riskRows = riskRows;
     state.scanRows = scanRows;
+    state.staticManualRules = staticManualRules;
     state.model = buildModel();
     updateFilterOptions();
     renderFromModel();
@@ -234,6 +239,46 @@ async function fetchAllRows(tableName) {
   }
 
   return rows;
+}
+
+async function fetchStaticManualRules() {
+  try {
+    const response = await fetch(STATIC_MANUAL_CONFIG_URL, { cache: "no-store" });
+    if (!response.ok) return [];
+    const config = await response.json();
+    const rules = Array.isArray(config) ? config : config.completedBatches;
+    if (!Array.isArray(rules)) return [];
+    return rules.map(normalizeStaticManualRule).filter(Boolean);
+  } catch (error) {
+    return [];
+  }
+}
+
+function normalizeStaticManualRule(rule) {
+  if (!rule || typeof rule !== "object") return null;
+  const shipBatch = clean(rule.shipBatch || rule["发货批次"]);
+  const inbound = clean(rule.inbound || rule["入库单号"]);
+  const upstream = clean(rule.upstream || rule["上游出库单号"]);
+  const sku = clean(rule.sku || rule["SKU"]);
+  if (!shipBatch && !inbound && !upstream && !sku) return null;
+
+  return {
+    id: clean(rule.id) || [shipBatch, inbound, upstream, sku].filter(Boolean).join("|"),
+    shipBatch,
+    inbound,
+    upstream,
+    sku,
+    warehouse: clean(rule.warehouse || rule["海外仓"]),
+    destination: clean(rule.destination || rule["最终目的仓(含亚马逊拦截）"]),
+    owner: clean(rule.owner || rule["负责人"]),
+    carrier: clean(rule.carrier || rule["承运商"]),
+    itemName: clean(rule.itemName || rule["品名"]),
+    riskCount: Math.max(0, Math.floor(Number(rule.riskCount ?? rule["风险数量"]) || 0)),
+    goodCount: Math.max(0, Math.floor(Number(rule.goodCount ?? rule["良品数量"]) || 0)),
+    badCount: Math.max(0, Math.floor(Number(rule.badCount ?? rule["不良品数量"]) || 0)),
+    status: clean(rule.status || rule["清点状态"]),
+    updatedAt: clean(rule.updatedAt) || "static-config",
+  };
 }
 
 function subscribeToRealtime() {
@@ -325,10 +370,12 @@ function buildModel() {
       eventCount: events.length,
       latestEvent,
       manual: false,
+      manualSource: "",
       manualOverrideId: "",
     };
   });
 
+  const staticManualSummary = applyStaticManualRules(enrichedRows);
   const manualSummary = applyManualOverrides(enrichedRows);
   const unmatchedEvents = scanEvents.filter((event) => event.snKey && !riskSnSet.has(event.snKey));
   const eventSnCounts = [...eventsBySn.values()].filter((events) => events.length > 1).length;
@@ -339,8 +386,11 @@ function buildModel() {
     scanFields,
     scanEvents,
     excludedTestScanRows,
+    staticManualSummary,
+    staticManualAppliedRows: staticManualSummary.applied,
     manualSummary,
-    manualAppliedRows: manualSummary.applied,
+    localManualAppliedRows: manualSummary.applied,
+    manualAppliedRows: manualSummary.applied + staticManualSummary.applied,
     unmatchedEvents,
     duplicateScanSnCount: eventSnCounts,
     rowsWithoutConfig,
@@ -361,7 +411,7 @@ function applyManualOverrides(rows) {
     const groupRows = rows
       .filter((row) => row.hasSn && row.warehouse === override.warehouse && row.batch === override.batch)
       .sort((a, b) => (a.sn || "").localeCompare(b.sn || "", "zh-CN"));
-    const cloudBadCount = groupRows.filter((row) => row.scanned && row.bad && !row.manual).length;
+    const cloudBadCount = groupRows.filter((row) => row.scanned && row.bad).length;
     const manualNeeded = Math.max(0, targetBadCount - cloudBadCount);
     const candidates = groupRows.filter((row) => !row.scanned);
     const appliedRows = candidates.slice(0, manualNeeded);
@@ -370,6 +420,7 @@ function applyManualOverrides(rows) {
       row.scanned = true;
       row.bad = true;
       row.manual = true;
+      row.manualSource = "local";
       row.manualOverrideId = override.id;
       row.latestEvent = {
         time: override.updatedAt || "",
@@ -393,6 +444,60 @@ function applyManualOverrides(rows) {
   }
 
   return summary;
+}
+
+function applyStaticManualRules(rows) {
+  const summary = {
+    applied: 0,
+    configured: state.staticManualRules.length,
+    items: [],
+  };
+
+  for (const rule of state.staticManualRules) {
+    const matchedRows = rows
+      .filter((row) => row.hasSn && matchesStaticManualRule(row, rule))
+      .sort((a, b) => (a.sn || "").localeCompare(b.sn || "", "zh-CN"));
+    let applied = 0;
+
+    for (const row of matchedRows) {
+      if (!row.manual || row.manualSource !== "file") applied += 1;
+      row.scanned = true;
+      row.bad = true;
+      row.manual = true;
+      row.manualSource = "file";
+      row.manualOverrideId = rule.id;
+      row.latestEvent = {
+        time: rule.updatedAt || "",
+        warehouse: "手动标记",
+        operator: "file",
+        bad: true,
+        manual: true,
+      };
+    }
+
+    summary.applied += applied;
+    summary.items.push({
+      id: rule.id,
+      shipBatch: rule.shipBatch,
+      inbound: rule.inbound,
+      upstream: rule.upstream,
+      sku: rule.sku,
+      expectedRiskCount: rule.riskCount,
+      matched: matchedRows.length,
+      applied,
+    });
+  }
+
+  return summary;
+}
+
+function matchesStaticManualRule(row, rule) {
+  if (rule.shipBatch && normalizeKey(row.shipBatch) !== normalizeKey(rule.shipBatch)) return false;
+  if (rule.inbound && normalizeKey(row.inbound) !== normalizeKey(rule.inbound)) return false;
+  if (rule.upstream && normalizeKey(row.upstream) !== normalizeKey(rule.upstream)) return false;
+  if (rule.sku && normalizeKey(row.sku) !== normalizeKey(rule.sku)) return false;
+  if (rule.warehouse && normalizeKey(row.warehouse) !== normalizeKey(rule.warehouse)) return false;
+  return true;
 }
 
 function isTestScanRow(row) {
@@ -696,15 +801,13 @@ function computeWarehouseStats(rows) {
 
 function renderKpis(stats) {
   setText("kpiRisk", nf.format(stats.scanable));
-  setText("kpiRiskNote", `${nf.format(stats.rowsTotal)} 条风险记录`);
+  setText("kpiRiskNote", `剔除空 SN · 共 ${nf.format(stats.rowsTotal)} 条风险记录`);
+  setText("kpiScanEvents", nf.format(stats.totalEvents));
+  setText("kpiScanEventsNote", stats.unmatchedEvents ? `未匹配风险 SN ${nf.format(stats.unmatchedEvents)}` : "全部扫码已匹配");
   setText("kpiScanned", nf.format(stats.scanned));
   setText("kpiProgress", `${formatPct(stats.progress)} 完成${stats.manual ? ` · 手动 ${nf.format(stats.manual)}` : ""}`);
-  setText("kpiBad", nf.format(stats.bad));
-  setText("kpiBadRate", `${formatPct(stats.badRate)} 不良率${stats.manual ? ` · 手动 ${nf.format(stats.manual)}` : ""}`);
   setText("kpiMissing", nf.format(stats.missing));
-  setText("kpiMissingRate", `${formatPct(stats.missingRate)} 未分拣`);
-  setText("kpiBlank", nf.format(stats.blank));
-  setText("kpiUnmatchedEvents", nf.format(stats.unmatchedEvents));
+  setText("kpiMissingRate", `${formatPct(stats.missingRate)} 剩余`);
 }
 
 function renderBatchList(groups) {
@@ -871,12 +974,13 @@ function renderExceptions(stats, model) {
     });
   }
 
-  if (model.excludedTestScanRows > 0) {
+  if (model.staticManualSummary.configured > 0) {
+    const unmatchedRules = model.staticManualSummary.items.filter((item) => item.matched === 0).length;
     issues.push({
-      level: "info",
-      title: "测试扫码已排除",
-      detail: "匹配 is_test、test_tag 或 raw_payload.test_device 的记录不计入进度。",
-      count: model.excludedTestScanRows,
+      level: unmatchedRules ? "warn" : "info",
+      title: "文件手动标记已加载",
+      detail: `${nf.format(model.staticManualSummary.configured)} 条规则，匹配 ${nf.format(model.staticManualAppliedRows)} 个风险 SN${unmatchedRules ? `，${nf.format(unmatchedRules)} 条规则未匹配` : ""}。`,
+      count: model.staticManualAppliedRows,
     });
   }
 
@@ -889,15 +993,6 @@ function renderExceptions(stats, model) {
     });
   }
 
-  if (stats.blank > 0) {
-    issues.push({
-      level: "warn",
-      title: "风险清单存在空 SN",
-      detail: "这些记录无法通过出货 SN 自动匹配 scan_events。",
-      count: stats.blank,
-    });
-  }
-
   if (stats.duplicate > 0) {
     issues.push({
       level: "info",
@@ -907,21 +1002,13 @@ function renderExceptions(stats, model) {
     });
   }
 
-  if (stats.withoutConfig > 0) {
-    issues.push({
-      level: "warn",
-      title: "风险 SN 未匹配调拨配置",
-      detail: "已回退使用风险清单里的目的仓，批次显示为未配置。",
-      count: stats.withoutConfig,
-    });
-  }
-
-  if (model.configOnlyInbounds.length > 0) {
+  const noRiskTransfers = getVisibleNoRiskTransfers(model);
+  if (noRiskTransfers.count > 0) {
     issues.push({
       level: "info",
-      title: "调拨单未匹配风险清单",
-      detail: model.configOnlyInbounds.slice(0, 5).join(" / "),
-      count: model.configOnlyInbounds.length,
+      title: "无风险调拨批次",
+      detail: `这些调拨单当前没有命中风险 SN：${noRiskTransfers.examples.join(" / ")}`,
+      count: noRiskTransfers.count,
     });
   }
 
@@ -948,6 +1035,43 @@ function renderExceptions(stats, model) {
     .join("");
 }
 
+function getVisibleNoRiskTransfers(model) {
+  const noRiskSet = new Set(model.configOnlyInbounds);
+  const search = normalizeSearch(state.filters.search);
+  const inboundFilter = normalizeSearch(state.filters.inbound);
+  const rows = state.warehouseRows.filter((row) => {
+    const inbound = clean(row[FIELDS.warehouse.inbound]);
+    if (!noRiskSet.has(normalizeKey(inbound))) return false;
+    if (state.filters.warehouse && clean(row[FIELDS.warehouse.warehouse]) !== state.filters.warehouse) return false;
+    if (state.filters.batch && clean(row[FIELDS.warehouse.batch]) !== state.filters.batch) return false;
+    if (inboundFilter && !normalizeSearch(inbound).includes(inboundFilter)) return false;
+    if (search) {
+      const haystack = normalizeSearch(
+        [
+          inbound,
+          row[FIELDS.warehouse.batch],
+          row[FIELDS.warehouse.shipBatch],
+          row[FIELDS.warehouse.warehouse],
+          row[FIELDS.warehouse.sku],
+          row[FIELDS.warehouse.upstream],
+        ].join(" "),
+      );
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+  const inbounds = uniqueSorted(rows.map((row) => row[FIELDS.warehouse.inbound])).filter(isDisplayableInbound);
+  return {
+    count: inbounds.length,
+    examples: inbounds.slice(0, 5),
+  };
+}
+
+function isDisplayableInbound(value) {
+  const normalized = normalizeKey(value);
+  return isValidKey(normalized) && !/^\/+$/.test(normalized);
+}
+
 function renderHeader(stats) {
   const loadedAt = state.model?.loadedAt;
   const footprint = [
@@ -955,7 +1079,8 @@ function renderHeader(stats) {
     `风险 ${nf.format(state.riskRows.length)}`,
     `扫码 ${nf.format(state.model?.scanEvents.length || 0)}`,
     state.model?.excludedTestScanRows ? `排除测试 ${nf.format(state.model.excludedTestScanRows)}` : "",
-    state.model?.manualAppliedRows ? `手动补录 ${nf.format(state.model.manualAppliedRows)}` : "",
+    state.model?.staticManualAppliedRows ? `文件标记 ${nf.format(state.model.staticManualAppliedRows)}` : "",
+    state.model?.localManualAppliedRows ? `手动补录 ${nf.format(state.model.localManualAppliedRows)}` : "",
   ].filter(Boolean).join(" · ");
 
   $("lastUpdated").textContent = loadedAt ? `更新 ${loadedAt.toLocaleString("zh-CN")}` : "等待数据";
@@ -1029,7 +1154,7 @@ function exportFilteredCsv() {
     row.latestEvent?.time || "",
     row.latestEvent?.warehouse || "",
     row.eventCount,
-    row.manual ? "手动配置" : "云端扫码",
+    getRowSourceLabel(row),
     row.configMatchMode,
   ]);
   const csv = [header, ...body].map((line) => line.map(csvEscape).join(",")).join("\r\n");
@@ -1355,20 +1480,54 @@ function importManualOverrides(event) {
   reader.readAsText(file, "utf-8");
 }
 
+function getRowSourceLabel(row) {
+  if (row.manualSource === "file") return "文件手动标记";
+  if (row.manualSource === "local") return "网页手动配置";
+  return row.eventCount ? "云端扫码" : "";
+}
+
 function getRiskStatus(row) {
   if (!row.hasSn) return { label: "空 SN", tone: "warn", rank: 1 };
-  if (row.manual) return { label: "手动配置", tone: "info", rank: 2 };
+  if (row.manual) return { label: row.manualSource === "file" ? "手动标记" : "手动配置", tone: "info", rank: 2 };
   if (row.scanned && row.bad) return { label: "不良", tone: "bad", rank: 2 };
   if (row.scanned) return { label: "已扫", tone: "good", rank: 4 };
   return { label: "未扫", tone: "warn", rank: 3 };
 }
 
 function sortRiskRows(a, b) {
+  const aRecentTs = getRecentScanTimestamp(a);
+  const bRecentTs = getRecentScanTimestamp(b);
+
+  if (aRecentTs || bRecentTs) {
+    if (!aRecentTs) return 1;
+    if (!bRecentTs) return -1;
+    if (a.warehouse !== b.warehouse) return a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true });
+    if (aRecentTs !== bRecentTs) return bRecentTs - aRecentTs;
+    return compareShipBatch(a, b) || (a.sn || "").localeCompare(b.sn || "", "zh-CN", { numeric: true });
+  }
+
+  const shipBatchDiff = compareShipBatch(a, b);
+  if (shipBatchDiff) return shipBatchDiff;
+  if (a.warehouse !== b.warehouse) return a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true });
   const statusDiff = getRiskStatus(a).rank - getRiskStatus(b).rank;
   if (statusDiff) return statusDiff;
-  if (a.batch !== b.batch) return a.batch.localeCompare(b.batch, "zh-CN");
-  if (a.warehouse !== b.warehouse) return a.warehouse.localeCompare(b.warehouse, "zh-CN");
   return (a.sn || "").localeCompare(b.sn || "", "zh-CN");
+}
+
+function getRecentScanTimestamp(row) {
+  if (row.manual) return 0;
+  const timestamp = Number(row.latestEvent?.timestamp || 0);
+  if (!timestamp) return 0;
+  const age = Date.now() - timestamp;
+  return age >= 0 && age <= RECENT_SCAN_WINDOW_MS ? timestamp : 0;
+}
+
+function compareShipBatch(a, b) {
+  const left = clean(a.shipBatch || a.batch);
+  const right = clean(b.shipBatch || b.batch);
+  if (left !== right) return left.localeCompare(right, "zh-CN", { numeric: true });
+  if (a.batch !== b.batch) return a.batch.localeCompare(b.batch, "zh-CN", { numeric: true });
+  return 0;
 }
 
 function statusBadge(status) {
