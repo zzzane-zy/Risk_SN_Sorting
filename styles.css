@@ -529,17 +529,17 @@ button {
 }
 
 .scan-period-table {
-  min-width: 940px;
+  min-width: 1080px;
 }
 
-.scan-period-table th:nth-child(3),
 .scan-period-table th:nth-child(4),
 .scan-period-table th:nth-child(5),
 .scan-period-table th:nth-child(6),
-.scan-period-table td:nth-child(3),
+.scan-period-table th:nth-child(7),
 .scan-period-table td:nth-child(4),
 .scan-period-table td:nth-child(5),
-.scan-period-table td:nth-child(6) {
+.scan-period-table td:nth-child(6),
+.scan-period-table td:nth-child(7) {
   text-align: right;
 }
 

@@ -865,8 +865,9 @@ function computeScanPeriodStats(model, filters) {
     if (!scanEventMatchesFilters(event, matchedRows, filters, search, inbound)) continue;
 
     const period = getScanPeriod(event.timestamp, state.scanPeriodMode);
-    const warehouse = displayScanWarehouse(event, matchedRows);
-    const key = `${period.key}|||${warehouse}`;
+    const warehouse = displayScanWarehouse(matchedRows);
+    const sku = displayScanSku(matchedRows);
+    const key = `${period.key}|||${warehouse}|||${sku}`;
 
     if (!groups.has(key)) {
       groups.set(key, {
@@ -875,6 +876,7 @@ function computeScanPeriodStats(model, filters) {
         periodLabel: period.label,
         periodStart: period.start,
         warehouse,
+        sku,
         total: 0,
         good: 0,
         bad: 0,
@@ -905,18 +907,20 @@ function computeScanPeriodStats(model, filters) {
       if (a.periodStart || b.periodStart) {
         if (!a.periodStart) return 1;
         if (!b.periodStart) return -1;
-        if (a.periodStart !== b.periodStart) return b.periodStart - a.periodStart;
+      if (a.periodStart !== b.periodStart) return b.periodStart - a.periodStart;
       }
-      return a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true });
+      return (
+        a.warehouse.localeCompare(b.warehouse, "zh-CN", { numeric: true }) ||
+        a.sku.localeCompare(b.sku, "zh-CN", { numeric: true })
+      );
     });
 }
 
 function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
   if (filters.warehouse) {
-    const eventWarehouse = normalizeKey(event.warehouse);
     const selectedWarehouse = normalizeKey(filters.warehouse);
     const riskWarehouseMatched = matchedRows.some((row) => normalizeKey(row.warehouse) === selectedWarehouse);
-    if (eventWarehouse !== selectedWarehouse && !riskWarehouseMatched) return false;
+    if (!riskWarehouseMatched) return false;
   }
 
   if (filters.batch && !matchedRows.some((row) => row.batch === filters.batch || row.shipBatch === filters.batch)) return false;
@@ -956,8 +960,18 @@ function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
   return true;
 }
 
-function displayScanWarehouse(event, matchedRows) {
-  return clean(event.warehouse) || clean(matchedRows[0]?.warehouse) || "未上报仓库";
+function displayScanWarehouse(matchedRows) {
+  const warehouses = uniqueSorted(matchedRows.map((row) => row.warehouse));
+  if (warehouses.length === 1) return warehouses[0];
+  if (warehouses.length > 1) return warehouses.join(" / ");
+  return "未匹配风险清单";
+}
+
+function displayScanSku(matchedRows) {
+  const skus = uniqueSorted(matchedRows.map((row) => row.sku));
+  if (skus.length === 1) return skus[0];
+  if (skus.length > 1) return skus.join(" / ");
+  return "未匹配SKU";
 }
 
 function getEventBatchLabels(matchedRows) {
@@ -1104,12 +1118,13 @@ function renderScanPeriodBoard(groups) {
   const visibleRows = groups.slice(0, 240);
   const totalEvents = groups.reduce((sum, group) => sum + group.total, 0);
   const warehouses = new Set(groups.map((group) => group.warehouse)).size;
+  const skus = new Set(groups.map((group) => group.sku)).size;
   $("scanPeriodSummary").textContent =
-    `${state.scanPeriodMode === "hour" ? "按小时" : "按日"} · ${nf.format(groups.length)} 个时间/仓组合 · ${nf.format(warehouses)} 个仓 · ${nf.format(totalEvents)} 条扫码`;
+    `${state.scanPeriodMode === "hour" ? "按小时" : "按日"} · ${nf.format(groups.length)} 个时间/仓/SKU组合 · ${nf.format(warehouses)} 个仓 · ${nf.format(skus)} 个SKU · ${nf.format(totalEvents)} 条扫码`;
 
   const tbody = $("scanPeriodTableBody");
   if (!visibleRows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-state">暂无扫码上报数据</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-state">暂无扫码上报数据</td></tr>`;
     return;
   }
 
@@ -1119,6 +1134,7 @@ function renderScanPeriodBoard(groups) {
         <tr>
           <td class="mono">${escapeHtml(group.periodLabel)}</td>
           <td><span class="truncate" title="${escapeAttr(group.warehouse)}">${escapeHtml(group.warehouse)}</span></td>
+          <td class="mono"><span class="truncate" title="${escapeAttr(group.sku)}">${escapeHtml(group.sku)}</span></td>
           <td><strong>${nf.format(group.total)}</strong></td>
           <td>${nf.format(group.good)}</td>
           <td>${nf.format(group.bad)}</td>
@@ -1875,7 +1891,7 @@ function setLoading(loading) {
 function showFatal(message) {
   setConnection("初始化失败", "bad");
   $("batchList").innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
-  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="7" class="empty-state">${escapeHtml(message)}</td></tr>`;
+  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="8" class="empty-state">${escapeHtml(message)}</td></tr>`;
   showToast(message);
 }
 
@@ -1883,7 +1899,7 @@ function renderErrors(error) {
   const message = escapeHtml(error?.message || "数据读取失败");
   $("batchList").innerHTML = `<div class="empty-state">${message}</div>`;
   $("warehouseChart").innerHTML = `<div class="empty-state">${message}</div>`;
-  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="7" class="empty-state">${message}</td></tr>`;
+  $("scanPeriodTableBody").innerHTML = `<tr><td colspan="8" class="empty-state">${message}</td></tr>`;
   $("riskTableBody").innerHTML = `<tr><td colspan="9" class="empty-state">${message}</td></tr>`;
   $("exceptionList").innerHTML = `<div class="empty-state">${message}</div>`;
 }
