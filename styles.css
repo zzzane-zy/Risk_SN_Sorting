@@ -532,6 +532,11 @@ button {
   min-width: 1080px;
 }
 
+.scan-period-table .cell-muted {
+  display: block;
+  margin-top: 3px;
+}
+
 .scan-period-table th:nth-child(4),
 .scan-period-table th:nth-child(5),
 .scan-period-table th:nth-child(6),

@@ -88,6 +88,63 @@ const PAGE_SIZE = 1000;
 const INVALID_KEYS = new Set(["", "#N/A", "N/A", "NA", "NULL", "UNDEFINED", "-", "0", "亚马逊"]);
 const MAX_TABLE_ROWS = 600;
 const RECENT_SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const SCAN_SKU_PREFIXES = [
+  "P0101000469",
+  "P0101000470",
+  "P0101000471",
+  "P0101000475",
+  "P0101000476",
+  "P0101000477",
+  "P0101000479",
+  "P0101000480",
+  "P0101000481",
+  "P0101000482",
+  "P0101000483",
+  "P0101000484",
+  "P0101000485",
+  "P0101000486",
+  "P0101000487",
+  "P0101000488",
+  "P0101000489",
+  "P0101000490",
+  "P0101000695",
+  "P0101000512",
+  "P0101000513",
+  "P0101000514",
+  "P0101000515",
+  "P0101000516",
+  "P0101000517",
+  "P0101000518",
+  "P0101000519",
+  "P0101000520",
+  "P0101000521",
+  "P0101000522",
+  "P0101000523",
+  "P0101000524",
+  "P0101000525",
+  "P0101000526",
+  "P0101000527",
+  "P0101000528",
+  "P0101000529",
+  "P0101000626",
+  "P0101000627",
+  "P0101000628",
+  "P0101000629",
+  "P0101000630",
+  "P0101000631",
+  "P0101000632",
+  "P0101000633",
+  "P0101000634",
+  "P0101000635",
+  "P0101000636",
+  "P0101000637",
+  "P0101000638",
+  "P0101000639",
+  "P0101000640",
+  "P0101000641",
+  "P0101000642",
+  "P0101000643",
+].sort((a, b) => b.length - a.length);
 
 const state = {
   client: null,
@@ -618,6 +675,7 @@ function normalizeScanEvents(rows, scanFields) {
       timestamp,
       warehouse: scanFields.warehouse ? clean(row[scanFields.warehouse]) : "",
       operator: scanFields.operator ? clean(row[scanFields.operator]) : "",
+      deviceType: detectDeviceType(row),
       bad: detectBad(row, scanFields),
     };
   });
@@ -671,6 +729,22 @@ function detectBad(row, scanFields) {
   }
 
   return false;
+}
+
+function detectDeviceType(row) {
+  const payload = row?.raw_payload && typeof row.raw_payload === "object" ? row.raw_payload : {};
+  return (
+    clean(row?.device_type) ||
+    clean(row?.device_id) ||
+    clean(row?.device) ||
+    clean(row?.deviceId) ||
+    clean(payload.device_type) ||
+    clean(payload.device_id) ||
+    clean(payload.device) ||
+    clean(payload.model) ||
+    clean(payload.camera) ||
+    clean(row?.scan_source)
+  );
 }
 
 function parseBadValue(value, booleanAllowed) {
@@ -856,17 +930,21 @@ function computeScanPeriodStats(model, filters) {
     rowsBySn.get(row.snKey).push(row);
   }
 
+  const skuNameIndex = buildSkuNameIndex(model.rows);
+  const deviceWarehouseIndex = buildDeviceWarehouseIndex(model.scanEvents, rowsBySn, state.scanPeriodMode);
   const groups = new Map();
   const search = normalizeSearch(filters.search);
   const inbound = normalizeSearch(filters.inbound);
 
   for (const event of model.scanEvents) {
     const matchedRows = event.snKey ? rowsBySn.get(event.snKey) || [] : [];
-    if (!scanEventMatchesFilters(event, matchedRows, filters, search, inbound)) continue;
-
     const period = getScanPeriod(event.timestamp, state.scanPeriodMode);
-    const warehouse = displayScanWarehouse(matchedRows);
-    const sku = displayScanSku(matchedRows);
+    const warehouse = displayScanWarehouse(matchedRows, event, deviceWarehouseIndex, period);
+    const skuInfo = getScanSkuInfo(matchedRows, event, skuNameIndex);
+    if (!warehouse || !skuInfo.sku) continue;
+    if (!scanEventMatchesFilters(event, matchedRows, filters, search, inbound, warehouse, skuInfo)) continue;
+
+    const sku = skuInfo.sku;
     const key = `${period.key}|||${warehouse}|||${sku}`;
 
     if (!groups.has(key)) {
@@ -877,6 +955,7 @@ function computeScanPeriodStats(model, filters) {
         periodStart: period.start,
         warehouse,
         sku,
+        itemName: skuInfo.itemName,
         total: 0,
         good: 0,
         bad: 0,
@@ -916,11 +995,11 @@ function computeScanPeriodStats(model, filters) {
     });
 }
 
-function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
+function scanEventMatchesFilters(event, matchedRows, filters, search, inbound, warehouse, skuInfo) {
   if (filters.warehouse) {
     const selectedWarehouse = normalizeKey(filters.warehouse);
     const riskWarehouseMatched = matchedRows.some((row) => normalizeKey(row.warehouse) === selectedWarehouse);
-    if (!riskWarehouseMatched) return false;
+    if (!riskWarehouseMatched && normalizeKey(warehouse) !== selectedWarehouse) return false;
   }
 
   if (filters.batch && !matchedRows.some((row) => row.batch === filters.batch || row.shipBatch === filters.batch)) return false;
@@ -938,8 +1017,11 @@ function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
       [
         event.rawSn,
         event.warehouse,
+        event.deviceType,
         event.operator,
         event.time,
+        skuInfo.sku,
+        skuInfo.itemName,
         ...matchedRows.flatMap((row) => [
           row.sn,
           row.machine,
@@ -960,23 +1042,112 @@ function scanEventMatchesFilters(event, matchedRows, filters, search, inbound) {
   return true;
 }
 
-function displayScanWarehouse(matchedRows) {
+function buildSkuNameIndex(rows) {
+  const counts = new Map();
+
+  const add = (sku, itemName) => {
+    const skuKey = clean(sku);
+    const name = clean(itemName);
+    if (!skuKey || !name) return;
+    if (!counts.has(skuKey)) counts.set(skuKey, new Map());
+    const nameCounts = counts.get(skuKey);
+    nameCounts.set(name, (nameCounts.get(name) || 0) + 1);
+  };
+
+  rows.forEach((row) => add(row.sku, row.itemName));
+  state.staticManualRules.forEach((rule) => add(rule.sku, rule.itemName));
+
+  return new Map(
+    [...counts.entries()].map(([sku, nameCounts]) => {
+      const [name] = [...nameCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))[0];
+      return [sku, name];
+    }),
+  );
+}
+
+function buildDeviceWarehouseIndex(scanEvents, rowsBySn, periodMode) {
+  const deviceCounts = new Map();
+  const periodDeviceCounts = new Map();
+
+  for (const event of scanEvents) {
+    if (!event.deviceType || !event.snKey) continue;
+    const matchedRows = rowsBySn.get(event.snKey) || [];
+    const period = getScanPeriod(event.timestamp, periodMode);
+    const periodDeviceKey = `${period.key}|||${event.deviceType}`;
+
+    for (const row of matchedRows) {
+      const warehouse = clean(row.warehouse);
+      if (!warehouse) continue;
+      addWarehouseCount(deviceCounts, event.deviceType, warehouse);
+      addWarehouseCount(periodDeviceCounts, periodDeviceKey, warehouse);
+    }
+  }
+
+  return {
+    byDevice: pickTopWarehouseByKey(deviceCounts),
+    byPeriodDevice: pickTopWarehouseByKey(periodDeviceCounts),
+  };
+}
+
+function addWarehouseCount(map, key, warehouse) {
+  if (!map.has(key)) map.set(key, new Map());
+  const warehouseCounts = map.get(key);
+  warehouseCounts.set(warehouse, (warehouseCounts.get(warehouse) || 0) + 1);
+}
+
+function pickTopWarehouseByKey(counts) {
+  return new Map(
+    [...counts.entries()].map(([key, warehouseCounts]) => {
+      const [warehouse] = [...warehouseCounts.entries()].sort(
+        (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN", { numeric: true }),
+      )[0];
+      return [key, warehouse];
+    }),
+  );
+}
+
+function displayScanWarehouse(matchedRows, event, deviceWarehouseIndex, period) {
   const warehouses = uniqueSorted(matchedRows.map((row) => row.warehouse));
   if (warehouses.length === 1) return warehouses[0];
   if (warehouses.length > 1) return warehouses.join(" / ");
-  return "未匹配风险清单";
+  const periodDeviceKey = `${period.key}|||${event.deviceType}`;
+  return clean(deviceWarehouseIndex.byPeriodDevice.get(periodDeviceKey)) || clean(deviceWarehouseIndex.byDevice.get(event.deviceType)) || "";
 }
 
-function displayScanSku(matchedRows) {
+function getScanSkuInfo(matchedRows, event, skuNameIndex) {
   const skus = uniqueSorted(matchedRows.map((row) => row.sku));
-  if (skus.length === 1) return skus[0];
-  if (skus.length > 1) return skus.join(" / ");
-  return "未匹配SKU";
+  const itemNames = uniqueSorted(matchedRows.map((row) => row.itemName));
+
+  if (skus.length === 1) {
+    return {
+      sku: skus[0],
+      itemName: itemNames[0] || clean(skuNameIndex.get(skus[0])),
+    };
+  }
+
+  if (skus.length > 1) {
+    return {
+      sku: skus.join(" / "),
+      itemName: itemNames.slice(0, 2).join(" / "),
+    };
+  }
+
+  const inferredSku = inferSkuFromSn(event.rawSn);
+  if (!inferredSku) return { sku: "", itemName: "" };
+  return {
+    sku: inferredSku,
+    itemName: clean(skuNameIndex.get(inferredSku)),
+  };
+}
+
+function inferSkuFromSn(value) {
+  const sn = normalizeSn(value);
+  return SCAN_SKU_PREFIXES.find((prefix) => sn.startsWith(prefix)) || "";
 }
 
 function getEventBatchLabels(matchedRows) {
   const labels = matchedRows.map((row) => clean(row.shipBatch || row.batch)).filter(Boolean);
-  return labels.length ? labels : ["未匹配风险清单"];
+  return labels;
 }
 
 function formatBatchList(batches) {
@@ -1134,7 +1305,10 @@ function renderScanPeriodBoard(groups) {
         <tr>
           <td class="mono">${escapeHtml(group.periodLabel)}</td>
           <td><span class="truncate" title="${escapeAttr(group.warehouse)}">${escapeHtml(group.warehouse)}</span></td>
-          <td class="mono"><span class="truncate" title="${escapeAttr(group.sku)}">${escapeHtml(group.sku)}</span></td>
+          <td>
+            <span class="mono truncate" title="${escapeAttr(group.sku)}">${escapeHtml(group.sku)}</span>
+            ${group.itemName ? `<span class="cell-muted" title="${escapeAttr(group.itemName)}">${escapeHtml(group.itemName)}</span>` : ""}
+          </td>
           <td><strong>${nf.format(group.total)}</strong></td>
           <td>${nf.format(group.good)}</td>
           <td>${nf.format(group.bad)}</td>
