@@ -972,10 +972,12 @@ function computeScanPeriodStats(model, filters) {
   }
 
   for (const item of preparedEvents) {
-    const assignedBatch = resolveScanGroupBatch(item, baseBatchIndex);
+    const assignedBatches = resolveScanGroupBatches(item, baseBatchIndex);
+    const groupBatch = formatBatchList(assignedBatches);
+    const groupBatchKey = assignedBatches.length ? assignedBatches.join("|||") : "__NO_BATCH__";
     const key =
       state.scanGroupMode === "batch"
-        ? `${item.baseKey}|||${assignedBatch || "__SKU_SUMMARY__"}`
+        ? `${item.baseKey}|||${groupBatchKey}`
         : item.baseKey;
 
     if (!groups.has(key)) {
@@ -987,7 +989,7 @@ function computeScanPeriodStats(model, filters) {
         warehouse: item.warehouse,
         sku: item.sku,
         itemName: item.skuInfo.itemName,
-        groupBatch: state.scanGroupMode === "batch" ? assignedBatch : "",
+        groupBatch: state.scanGroupMode === "batch" ? groupBatch : "",
         total: 0,
         good: 0,
         bad: 0,
@@ -1001,9 +1003,7 @@ function computeScanPeriodStats(model, filters) {
     else group.good += 1;
     const batchesToAdd =
       state.scanGroupMode === "batch"
-        ? assignedBatch
-          ? [assignedBatch]
-          : []
+        ? assignedBatches
         : item.validBatches;
     batchesToAdd.forEach((batch) => group.batches.add(batch));
   }
@@ -1014,7 +1014,7 @@ function computeScanPeriodStats(model, filters) {
       return {
         ...group,
         batches,
-        batchLabel: state.scanGroupMode === "batch" ? group.groupBatch || "按SKU汇总" : formatBatchList(batches),
+        batchLabel: state.scanGroupMode === "batch" ? group.groupBatch || "-" : formatBatchList(batches),
         badRate: ratio(group.bad, group.total),
       };
     })
@@ -1032,13 +1032,12 @@ function computeScanPeriodStats(model, filters) {
     });
 }
 
-function resolveScanGroupBatch(item, baseBatchIndex) {
-  if (state.scanGroupMode !== "batch") return "";
-  if (item.validBatches.length === 1) return item.validBatches[0];
-  if (item.validBatches.length > 1) return item.validBatches.join(" / ");
+function resolveScanGroupBatches(item, baseBatchIndex) {
+  if (state.scanGroupMode !== "batch") return [];
+  if (item.validBatches.length) return item.validBatches;
 
   const relatedBatches = [...(baseBatchIndex.get(item.baseKey) || [])];
-  return relatedBatches.length === 1 ? relatedBatches[0] : "";
+  return relatedBatches.sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
 }
 
 function scanEventMatchesFilters(event, matchedRows, filters, search, inbound, warehouse, skuInfo) {
@@ -1199,7 +1198,7 @@ function isConfiguredScanBatch(value) {
   const text = clean(value);
   if (!text) return false;
   const normalized = normalizeKey(text);
-  return normalized && normalized !== "未配置批次" && normalized !== "未匹配风险清单" && normalized !== "按SKU汇总";
+  return normalized && normalized !== "未配置批次" && normalized !== "未匹配风险清单";
 }
 
 function formatBatchList(batches) {
